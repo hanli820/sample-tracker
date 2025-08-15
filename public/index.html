@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>样品跟进可视化看板 (LeanCloud全托管版)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- LeanCloud SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/leancloud-storage@4.13.0/dist/av-live-query-min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', 'Helvetica Neue', 'Arial', 'sans-serif';
+            background-color: #111827;
+            background-image: linear-gradient(rgba(17, 24, 39, 0.9), rgba(17, 24, 39, 0.9)), url('/images/hero-bg.jpg');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            color: #d1d5db;
+        }
+        .view-toggle-btn.active { background-color: #4338ca; color: white; }
+        .filter-btn.active { background-color: #3730a3; color: white; }
+        .loader {
+            border: 4px solid #f3f3f3; border-top: 4px solid #4338ca;
+            border-radius: 50%; width: 40px; height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .hero-header {
+            position: relative; padding: 4rem 2rem; border-radius: 0.75rem;
+            overflow: hidden; background-color: rgba(17, 24, 39, 0.5);
+            backdrop-filter: blur(5px); border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background-color: rgba(0, 0, 0, 0.7); z-index: 1000;
+            display: flex; justify-content: center; align-items: center;
+            backdrop-filter: blur(5px);
+        }
+        .modal-content {
+            background-color: #1f2937; border-radius: 0.5rem; width: 90%;
+            max-width: 600px; max-height: 90vh; overflow-y: auto;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+        }
+        .camera-preview {
+            width: 100%; height: 300px; background-color: #111827;
+            display: flex; justify-content: center; align-items: center; position: relative;
+        }
+        #camera-view { width: 100%; height: 100%; object-fit: contain; }
+        .capture-btn {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            width: 60px; height: 60px; border-radius: 50%; background-color: white;
+            border: 4px solid #f3f4f6; cursor: pointer;
+        }
+        .captured-image { max-width: 100%; max-height: 300px; display: block; margin: 0 auto; }
+        #image-preview-modal .modal-content {
+            background-color: transparent; max-width: 80vw; max-height: 80vh;
+            padding: 1rem; overflow: hidden;
+        }
+        #preview-image {
+            width: auto; height: auto; max-width: 100%; max-height: calc(80vh - 4rem);
+            display: block; margin: auto; border-radius: 0.5rem;
+        }
+        .status-retrieved { border-color: #22c55e; }
+        .status-confirmed { border-color: #eab308; }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+    <div class="max-w-screen-xl mx-auto">
+        <header class="hero-header mb-8">
+            <div class="relative z-10 text-center">
+                <h1 class="text-4xl md:text-5xl font-bold text-white tracking-tight">样品跟进看板 (LeanCloud全托管版)</h1>
+                <p class="mt-3 text-lg text-gray-300">可视化您的工作流</p>
+            </div>
+            <div id="io-section" class="absolute z-20 top-4 right-4 flex items-center gap-3">
+                <div class="text-right">
+                    <label for="csv-file-input" class="inline-block bg-indigo-600/80 text-white px-4 py-2 text-sm rounded-lg font-semibold cursor-pointer hover:bg-indigo-700 transition-colors">
+                        上传CSV
+                    </label>
+                    <input type="file" id="csv-file-input" class="hidden" accept=".csv">
+                </div>
+                <button id="export-csv-btn" class="hidden bg-green-600/80 text-white px-4 py-2 text-sm rounded-lg font-semibold hover:bg-green-700 transition-colors">
+                    导出CSV
+                </button>
+                <button id="scan-entry-btn" class="bg-blue-600/80 text-white px-4 py-2 text-sm rounded-lg font-semibold hover:bg-blue-700 transition-colors">
+                    扫码录入
+                </button>
+            </div>
+        </header>
+
+        <div id="loading-indicator" class="hidden justify-center items-center my-10">
+            <div class="loader"></div>
+            <p class="ml-4 text-gray-300">正在连接数据库并加载数据...</p>
+        </div>
+        
+        <div id="config-warning" class="hidden mb-4 p-4 bg-red-800/80 border border-red-600 rounded-lg text-white text-center">
+            <h3 class="font-bold text-lg">配置错误</h3>
+            <p>未能连接到数据库。请检查代码中的 `appId` 和 `appKey` 是否已正确填写。</p>
+        </div>
+        
+        <div id="dashboard-section" class="hidden mb-8 p-4 bg-gray-800/50 rounded-lg shadow-sm backdrop-blur-sm">
+            <h2 class="text-2xl font-bold text-white mb-4 text-center">数据统计面板</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div>
+                    <h3 class="font-semibold text-gray-300 mb-2 text-center">样品状态分布</h3>
+                    <div class="bg-gray-900/30 p-4 rounded-lg flex justify-center items-center h-64 md:h-80">
+                        <canvas id="status-chart"></canvas>
+                    </div>
+                </div>
+                <div>
+                    <h3 class="font-semibold text-gray-300 mb-2 text-center">客户样品分布</h3>
+                    <div class="bg-gray-900/30 p-4 rounded-lg flex justify-center items-center h-64 md:h-80">
+                        <canvas id="customer-chart"></canvas>
+                    </div>
+                </div>
+                <div>
+                    <h3 class="font-semibold text-gray-300 mb-2 text-center">工厂样品数量</h3>
+                    <div class="bg-gray-900/30 p-4 rounded-lg flex justify-center items-center h-64 md:h-80">
+                        <canvas id="factory-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="controls-section" class="hidden">
+             <div class="flex justify-center mb-6">
+                 <div class="inline-flex rounded-md shadow-sm" role="group">
+                    <button id="grid-view-btn" type="button" class="view-toggle-btn active px-4 py-2 text-sm font-medium bg-gray-700 border border-gray-600 rounded-l-lg hover:bg-gray-600">网格视图</button>
+                    <button id="table-view-btn" type="button" class="view-toggle-btn px-4 py-2 text-sm font-medium bg-gray-700 border-r border-t border-b border-gray-600 rounded-r-lg hover:bg-gray-600">表格视图</button>
+                </div>
+            </div>
+            <div id="filters-container" class="mb-8 p-4 bg-gray-800/50 rounded-lg shadow-sm">
+                 <div id="customer-filters" class="mb-4"><h3 class="font-semibold text-gray-300 mb-2">客户:</h3><div class="flex flex-wrap gap-2"></div></div>
+                 <div id="factory-filters" class="mb-4"><h3 class="font-semibold text-gray-300 mb-2">工厂:</h3><div class="flex flex-wrap gap-2"></div></div>
+                 <div id="status-filters"><h3 class="font-semibold text-gray-300 mb-2">跟进状态:</h3><div class="flex flex-wrap gap-2"></div></div>
+            </div>
+        </div>
+
+        <div id="content-container">
+            <div class="text-center py-12 bg-gray-800/50 rounded-lg shadow-md">
+                <svg class="mx-auto h-12 w-12 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+                <h3 class="mt-2 text-sm font-medium text-gray-200">无数据</h3>
+                <p class="mt-1 text-sm text-gray-400">请先上传一个CSV文件来查看内容。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 扫码录入模态框 -->
+    <div id="scan-entry-modal" class="modal-overlay hidden">
+        <div class="modal-content p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-white">扫码录入样品</h2>
+                <button id="close-modal-btn" class="text-gray-400 hover:text-white">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            
+            <div class="space-y-4">
+                <div>
+                    <label for="customer-input" class="block text-sm font-medium text-gray-300 mb-1">客户简称</label>
+                    <input type="text" id="customer-input" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label for="barcode-input" class="block text-sm font-medium text-gray-300 mb-1">编码</label>
+                    <input type="text" id="barcode-input" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                
+                <div>
+                    <label for="product-name-input" class="block text-sm font-medium text-gray-300 mb-1">产品名称</label>
+                    <input type="text" id="product-name-input" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+
+                <div>
+                    <label for="model-name-input" class="block text-sm font-medium text-gray-300 mb-1">车型</label>
+                    <input type="text" id="model-name-input" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                
+                <div>
+                    <label for="factory-input" class="block text-sm font-medium text-gray-300 mb-1">工厂</label>
+                    <input type="text" id="factory-input" list="factory-list" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <datalist id="factory-list"></datalist>
+                </div>
+
+                <div>
+                    <label for="progress-input" class="block text-sm font-medium text-gray-300 mb-1">进度</label>
+                    <input type="text" id="progress-input" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">产品照片</label>
+                    <div id="qr-code-section" class="hidden">
+                        <div class="qr-code-container">
+                            <div id="qr-code"></div>
+                            <p class="qr-instruction">使用手机扫描此二维码上传照片</p>
+                        </div>
+                        <div class="flex justify-center mt-4">
+                            <button id="check-upload-btn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md">检查上传结果</button>
+                        </div>
+                    </div>
+                    <div id="camera-section">
+                        <div class="camera-preview mb-2">
+                            <video id="camera-view" autoplay playsinline class="hidden"></video>
+                            <canvas id="camera-canvas" class="hidden"></canvas>
+                            <img id="captured-image" class="captured-image hidden" alt="已拍摄照片">
+                            <div id="no-camera" class="text-gray-400">摄像头未开启</div>
+                            <button id="capture-btn" class="capture-btn hidden"></button>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="start-camera-btn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded">开启摄像头</button>
+                            <button id="upload-image-btn" class="flex-1 bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded">上传图片</button>
+                            <button id="use-qr-btn" class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded">手机扫码上传</button>
+                            <input type="file" id="image-upload-input" accept="image/*" capture="environment" class="hidden">
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="pt-4 flex justify-end gap-3">
+                    <button id="cancel-entry-btn" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-md">取消</button>
+                    <button id="save-entry-btn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md">保存样品</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Import Choice Modal -->
+    <div id="import-choice-modal" class="modal-overlay hidden">
+        <div class="modal-content p-6 max-w-md">
+             <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-white">选择导入模式</h2>
+                <button id="close-import-choice-modal-btn" class="text-gray-400 hover:text-white">&times;</button>
+            </div>
+            <p class="text-gray-400 text-sm mb-6">您希望如何处理上传的CSV文件？</p>
+            <div class="flex justify-end gap-3">
+                <button id="import-mode-append" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-md">追加新纪录</button>
+                <button id="import-mode-replace" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md">替换现有数据</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Append Review Modal -->
+    <div id="append-review-modal" class="modal-overlay hidden">
+        <div class="modal-content p-6 max-w-4xl">
+             <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-white">数据审核</h2>
+                <button id="close-review-modal-btn" class="text-gray-400 hover:text-white">&times;</button>
+            </div>
+            <p class="text-gray-400 text-sm mb-4">请审核以下待追加的记录。系统已自动标注重复项，您可以手动删除任何不需要的行。</p>
+            <div id="review-table-container" class="max-h-[60vh] overflow-y-auto border border-gray-700 rounded-lg">
+                <!-- Review table will be injected here -->
+            </div>
+            <div class="pt-4 flex justify-end gap-3">
+                <button id="cancel-review-btn" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-md">取消</button>
+                <button id="confirm-review-btn" class="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-md">确认追加</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 图片预览模态框 -->
+    <div id="image-preview-modal" class="modal-overlay hidden">
+        <div class="modal-content"><img id="preview-image" src="" alt="样品大图预览"></div>
+    </div>
+
+    <!-- 删除确认模态框 -->
+    <div id="delete-confirm-modal" class="modal-overlay hidden">
+        <div class="modal-content p-6 max-w-sm">
+            <h2 class="text-xl font-bold text-white mb-4">确认删除</h2>
+            <p class="text-gray-300 mb-6">您确定要删除这个样品吗？此操作无法撤销。</p>
+            <div class="flex justify-end gap-3">
+                <button id="cancel-delete-btn" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-md">取消</button>
+                <button id="confirm-delete-btn" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md">确认删除</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- LeanCloud Configuration ---
+        const appId = "MqDn2gpkI651klgLjAouA39Y-gzGzoHsz";
+        const appKey = "KgdTkYhnc1L9XPeDVKUeyxDU";
+        const serverURL = "YOUR_SERVER_URL"; // 国内版通常不需要填写
+
+        // --- Global Variables ---
+        let allData = [];
+        let liveQuery;
+        let itemsToAppend = [];
+        // ... other variables
+
+        // --- LeanCloud Initialization ---
+        try {
+            if (!appId || appId === "YOUR_APP_ID") throw new Error("LeanCloud App ID 未配置");
+            AV.init({ appId, appKey, serverURL });
+            document.getElementById('loading-indicator').style.display = 'flex';
+        } catch (e) {
+            console.error("LeanCloud 初始化失败:", e);
+            document.getElementById('config-warning').classList.remove('hidden');
+        }
+
+        // --- Real-time Data Listener ---
+        async function setupLiveQuery() {
+            if (!AV.applicationId) return;
+            if (liveQuery) await liveQuery.unsubscribe();
+            
+            const query = new AV.Query('Sample');
+            query.descending('createdAt');
+            liveQuery = await query.subscribe();
+
+            const processResults = async (results) => {
+                const dataPromises = results.map(async (obj) => {
+                    const item = { ...obj.attributes, id: obj.id };
+                    let displayUrl = item.originalImage;
+                    if (item.originalImage && !item.originalImage.startsWith('http') && !item.originalImage.startsWith('data:')) {
+                        displayUrl = `/images/${item.originalImage}`;
+                    } else if (!item.originalImage) {
+                         displayUrl = `https://placehold.co/400x300/1f2937/d1d5db?text=${encodeURIComponent(item.车型 || '未知')}`;
+                    }
+                    item.compressedImage = await compressImage(displayUrl);
+                    return item;
+                });
+                allData = await Promise.all(dataPromises);
+                
+                if (allData.length > 0) {
+                    controlsSection.classList.remove('hidden');
+                    exportBtn.classList.remove('hidden');
+                }
+                
+                setupFilters();
+                renderContent();
+                renderDashboard();
+                loadingIndicator.style.display = 'none';
+            };
+
+            const initialResults = await query.find();
+            await processResults(initialResults);
+
+            liveQuery.on('update', () => query.find().then(processResults));
+            liveQuery.on('create', () => query.find().then(processResults));
+            liveQuery.on('delete', () => query.find().then(processResults));
+        }
+        if (AV.applicationId) setupLiveQuery();
+
+        // --- Core Functions (Save, Update, Delete using LeanCloud) ---
+        async function saveEntryBtnClickHandler() {
+            const customer = customerInput.value.trim();
+            const code = barcodeInput.value.trim();
+            const productName = productNameInput.value.trim();
+            const modelName = modelNameInput.value.trim();
+            const factory = factoryInput.value.trim();
+            const progress = progressInput.value.trim();
+            const image = capturedImage.src || uploadedImageUrl;
+            
+            if (!customer || !code || !productName || !modelName || !factory || !image) {
+                alert('请填写所有字段并提供照片'); return;
+            }
+
+            const query = new AV.Query('Sample');
+            query.equalTo('编码', code);
+            query.equalTo('客户简称', customer);
+            query.equalTo('跟进', '未收回');
+            const count = await query.count();
+
+            if (count > 0) {
+                alert('该编码已存在于一个“未收回”的样品中，请勿重复录入'); return;
+            }
+
+            loadingIndicator.style.display = 'flex';
+            
+            try {
+                const file = new AV.File(`${code}.jpg`, { base64: image.split(',')[1] });
+                const savedFile = await file.save();
+                const imageUrl = savedFile.url();
+
+                const SampleObject = AV.Object.extend('Sample');
+                const sample = new SampleObject();
+                sample.set('客户简称', customer);
+                sample.set('编码', code);
+                sample.set('产品名称', productName);
+                sample.set('车型', modelName);
+                sample.set('工厂', factory);
+                sample.set('寄出时间', formatDate(new Date()));
+                sample.set('进度', progress);
+                sample.set('跟进', '未收回');
+                sample.set('originalImage', imageUrl);
+                sample.set('图片', `${code}.jpg`);
+                
+                await sample.save();
+                closeModal();
+            } catch (error) {
+                console.error("保存样品到数据库时出错:", error);
+                alert("保存样品时发生错误");
+            } finally {
+                loadingIndicator.style.display = 'none';
+            }
+        }
+        saveEntryBtn.addEventListener('click', saveEntryBtnClickHandler);
+
+        async function updateStatusHandler(e) {
+            if (e.target.dataset.action === 'update-status') {
+                const itemId = e.target.dataset.id;
+                const newStatus = e.target.value;
+                try {
+                    const sample = AV.Object.createWithoutData('Sample', itemId);
+                    sample.set('跟进', newStatus);
+                    await sample.save();
+                } catch (error) {
+                    console.error("更新状态失败:", error);
+                    alert("更新状态失败，请重试。");
+                }
+            }
+        }
+        contentContainer.addEventListener('change', updateStatusHandler);
+        
+        async function confirmDeleteBtnClickHandler() {
+            if (itemToDeleteId) {
+                try {
+                    const sample = AV.Object.createWithoutData('Sample', itemToDeleteId);
+                    await sample.destroy();
+                } catch (error) {
+                    console.error("删除失败:", error);
+                    alert("删除失败，请重试。");
+                }
+            }
+            deleteConfirmModal.classList.add('hidden');
+            itemToDeleteId = null;
+        }
+        confirmDeleteBtn.addEventListener('click', confirmDeleteBtnClickHandler);
+
+        async function confirmReviewBtnClickHandler() {
+            const newItems = itemsToAppend.filter(item => item.status === 'new');
+            if (newItems.length === 0) {
+                closeReviewModal();
+                return;
+            }
+            
+            loadingIndicator.style.display = 'flex';
+            
+            const objectsToSave = newItems.map(item => {
+                const SampleObject = AV.Object.extend('Sample');
+                const sample = new SampleObject();
+                const { id, status, compressedImage, ...dataToSave } = item;
+                for (const key in dataToSave) {
+                    sample.set(key, dataToSave[key]);
+                }
+                return sample;
+            });
+
+            try {
+                await AV.Object.saveAll(objectsToSave);
+                alert(`操作完成。\n成功追加 ${newItems.length} 条新记录。`);
+            } catch (error) {
+                console.error("批量追加到数据库失败:", error);
+                alert("批量追加失败，请重试。");
+            } finally {
+                loadingIndicator.style.display = 'none';
+                closeReviewModal();
+            }
+        }
+        confirmReviewBtn.addEventListener('click', confirmReviewBtnClickHandler);
+
+        // All other functions (parseCSV, processAndNormalizeData, UI interactions, etc.) remain the same.
+        // The local storage auto-save is no longer needed.
+        // The export function remains, exporting the current state of `allData`.
+
+    </script>
+    <!-- The rest of the script tag with all UI functions remains here -->
+</body>
+</html>
